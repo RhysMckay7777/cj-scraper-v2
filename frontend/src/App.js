@@ -7,7 +7,8 @@ import {
   Sliders, 
   History,
   Menu,
-  X
+  X,
+  Upload
 } from 'lucide-react';
 
 import Dashboard from './pages/Dashboard';
@@ -15,10 +16,12 @@ import SettingsPage from './pages/SettingsPage';
 import PriceSync from './pages/PriceSync';
 import ConfigPage from './pages/ConfigPage';
 import SyncHistory from './pages/SyncHistory';
+import ImportPage from './pages/ImportPage';
 
 const navigation = [
   { name: 'Dashboard', path: '/', icon: LayoutDashboard },
   { name: 'Price Sync', path: '/sync', icon: RefreshCw },
+  { name: 'Import', path: '/import', icon: Upload },
   { name: 'Config', path: '/config', icon: Sliders },
   { name: 'History', path: '/history', icon: History },
   { name: 'Settings', path: '/settings', icon: Settings },
@@ -104,6 +107,7 @@ function App() {
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/sync" element={<PriceSync />} />
+            <Route path="/import" element={<ImportPage />} />
             <Route path="/config" element={<ConfigPage />} />
             <Route path="/history" element={<SyncHistory />} />
             <Route path="/settings" element={<SettingsPage />} />

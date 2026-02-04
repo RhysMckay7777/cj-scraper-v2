@@ -2,6 +2,10 @@ const express = require('express');
 const path = require('path');
 const axios = require('axios');
 const fs = require('fs');
+const zlib = require('zlib');
+const multer = require('multer');
+const AdmZip = require('adm-zip');
+const { parse } = require('csv-parse/sync');
 const { searchCJProducts, getCJCategories, cancelScrape, generateScrapeId, MAX_OFFSET } = require('./cj-api-scraper');
 const { getCategoryIndex, searchCategories, isValidCategoryId, getCategoryById } = require('./category-service');
 const { mapSearchToCategories, generateDynamicKeywords, clearCache: clearKeywordCache } = require('./ai-keyword-generator');
@@ -684,6 +688,340 @@ app.get('/api/categories', async (req, res) => {
   }
 });
 
+// ============================================
+// CSV IMPORT ENDPOINTS
+// ============================================
+
+// Multer configuration for file uploads
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ['.csv', '.gz', '.zip'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (allowedTypes.includes(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only .csv, .gz, and .zip files are allowed'));
+    }
+  }
+});
+
+// POST /api/import-csv - Upload and parse CSV
+app.post('/api/import-csv', upload.single('file'), async (req, res) => {
+  const requestId = Date.now().toString(36);
+  console.log(`[${requestId}] POST /api/import-csv`);
+
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file uploaded', requestId });
+  }
+
+  try {
+    let csvData;
+    const ext = path.extname(req.file.originalname).toLowerCase();
+    console.log(`[${requestId}] Processing file: ${req.file.originalname} (${ext})`);
+
+    if (ext === '.gz') {
+      // Decompress gzip
+      csvData = zlib.gunzipSync(req.file.buffer).toString('utf8');
+    } else if (ext === '.zip') {
+      // Extract from zip
+      const zip = new AdmZip(req.file.buffer);
+      const zipEntries = zip.getEntries();
+      const csvEntry = zipEntries.find(e => e.entryName.endsWith('.csv'));
+      if (!csvEntry) {
+        return res.status(400).json({ error: 'No CSV file found in zip', requestId });
+      }
+      csvData = csvEntry.getData().toString('utf8');
+    } else {
+      // Plain CSV
+      csvData = req.file.buffer.toString('utf8');
+    }
+
+    // Parse CSV
+    const records = parse(csvData, {
+      columns: true,
+      skip_empty_lines: true,
+      relax_column_count: true
+    });
+
+    console.log(`[${requestId}] Parsed ${records.length} rows`);
+
+    // Extract products, group by Handle
+    const productsMap = new Map();
+
+    for (const row of records) {
+      const handle = row['Handle'] || row['handle'] || '';
+      const title = row['Title'] || row['title'] || '';
+      const sku = row['Variant SKU'] || row['variant_sku'] || '';
+      
+      if (!handle) continue;
+
+      if (!productsMap.has(handle)) {
+        productsMap.set(handle, {
+          handle,
+          title,
+          skus: sku ? [sku] : [],
+          variantCount: 1
+        });
+      } else {
+        const existing = productsMap.get(handle);
+        existing.variantCount++;
+        if (sku && !existing.skus.includes(sku)) {
+          existing.skus.push(sku);
+        }
+      }
+    }
+
+    const products = Array.from(productsMap.values());
+    console.log(`[${requestId}] Found ${products.length} unique products`);
+
+    res.json({
+      success: true,
+      requestId,
+      totalRows: records.length,
+      products: products.map(p => ({
+        handle: p.handle,
+        title: p.title,
+        sku: p.skus[0] || '',
+        variantCount: p.variantCount
+      }))
+    });
+
+  } catch (error) {
+    console.error(`[${requestId}] CSV parse error:`, error);
+    res.status(500).json({ error: error.message, requestId });
+  }
+});
+
+// POST /api/match-products - Match titles to CJ products
+app.post('/api/match-products', async (req, res) => {
+  const requestId = Date.now().toString(36);
+  console.log(`[${requestId}] POST /api/match-products`);
+
+  const { products } = req.body;
+
+  if (!products || !Array.isArray(products)) {
+    return res.status(400).json({ error: 'Products array required', requestId });
+  }
+
+  if (!CJ_API_TOKEN) {
+    return res.status(500).json({ error: 'CJ_API_TOKEN not configured', requestId });
+  }
+
+  try {
+    const results = [];
+    const RATE_LIMIT_DELAY = 300; // 300ms between requests
+
+    for (let i = 0; i < products.length; i++) {
+      const { handle, title } = products[i];
+      console.log(`[${requestId}] Matching ${i + 1}/${products.length}: "${title.substring(0, 50)}..."`);
+
+      try {
+        // Search CJ API for matching products
+        // Use first few words of title for better matches
+        const searchWords = title.split(' ').slice(0, 5).join(' ');
+        
+        const response = await axios.get('https://developers.cjdropshipping.com/api/2.0/product/list', {
+          params: {
+            productNameEn: searchWords,
+            pageNum: 1,
+            pageSize: 5
+          },
+          headers: {
+            'CJ-Access-Token': CJ_API_TOKEN
+          },
+          timeout: 15000
+        });
+
+        const cjProducts = response.data?.data?.list || [];
+        
+        // Calculate confidence scores
+        const matches = cjProducts.map(cj => {
+          const cjTitle = (cj.productNameEn || '').toLowerCase();
+          const shopifyTitle = title.toLowerCase();
+          
+          // Simple word overlap scoring
+          const shopifyWords = shopifyTitle.split(/\s+/).filter(w => w.length > 2);
+          const cjWords = cjTitle.split(/\s+/).filter(w => w.length > 2);
+          
+          const matchingWords = shopifyWords.filter(w => cjWords.some(cw => cw.includes(w) || w.includes(cw)));
+          const confidence = shopifyWords.length > 0 ? Math.round((matchingWords.length / shopifyWords.length) * 100) : 0;
+          
+          return {
+            cjProductId: cj.pid,
+            cjTitle: cj.productNameEn,
+            cjImage: cj.productImage,
+            cjPrice: cj.sellPrice,
+            confidence
+          };
+        }).sort((a, b) => b.confidence - a.confidence);
+
+        results.push({
+          handle,
+          title,
+          matches,
+          bestMatch: matches[0] || null
+        });
+
+      } catch (matchError) {
+        console.error(`[${requestId}] Match error for "${title}":`, matchError.message);
+        results.push({
+          handle,
+          title,
+          matches: [],
+          bestMatch: null,
+          error: matchError.message
+        });
+      }
+
+      // Rate limit delay
+      if (i < products.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY));
+      }
+    }
+
+    res.json({
+      success: true,
+      requestId,
+      results
+    });
+
+  } catch (error) {
+    console.error(`[${requestId}] Match products error:`, error);
+    res.status(500).json({ error: error.message, requestId });
+  }
+});
+
+// POST /api/link-products - Apply confirmed matches
+app.post('/api/link-products', async (req, res) => {
+  const requestId = Date.now().toString(36);
+  console.log(`[${requestId}] POST /api/link-products`);
+
+  const { links, shopifyStore, shopifyToken } = req.body;
+
+  if (!links || !Array.isArray(links)) {
+    return res.status(400).json({ error: 'Links array required', requestId });
+  }
+
+  if (!shopifyStore || !shopifyToken) {
+    return res.status(400).json({ error: 'Shopify credentials required', requestId });
+  }
+
+  const cleanStoreUrl = shopifyStore.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+  const GRAPHQL_ENDPOINT = `https://${cleanStoreUrl}/admin/api/2024-01/graphql.json`;
+
+  const results = {
+    success: 0,
+    failed: 0,
+    errors: []
+  };
+
+  for (const link of links) {
+    const { shopifyHandle, cjProductId } = link;
+    
+    if (!shopifyHandle || !cjProductId) {
+      results.failed++;
+      results.errors.push({ handle: shopifyHandle, error: 'Missing handle or CJ product ID' });
+      continue;
+    }
+
+    try {
+      // First, find the Shopify product by handle
+      const findQuery = `
+        query FindProduct($handle: String!) {
+          productByHandle(handle: $handle) {
+            id
+            title
+          }
+        }
+      `;
+
+      const findResponse = await axios.post(GRAPHQL_ENDPOINT, {
+        query: findQuery,
+        variables: { handle: shopifyHandle }
+      }, {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': shopifyToken
+        },
+        timeout: 15000
+      });
+
+      const product = findResponse.data?.data?.productByHandle;
+      if (!product) {
+        results.failed++;
+        results.errors.push({ handle: shopifyHandle, error: 'Product not found in Shopify' });
+        continue;
+      }
+
+      // Set the CJ product ID metafield
+      const metafieldMutation = `
+        mutation SetMetafield($input: ProductInput!) {
+          productUpdate(input: $input) {
+            product {
+              id
+              metafield(namespace: "custom", key: "cj_product_id") {
+                value
+              }
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `;
+
+      const metafieldResponse = await axios.post(GRAPHQL_ENDPOINT, {
+        query: metafieldMutation,
+        variables: {
+          input: {
+            id: product.id,
+            metafields: [{
+              namespace: 'custom',
+              key: 'cj_product_id',
+              value: cjProductId,
+              type: 'single_line_text_field'
+            }]
+          }
+        }
+      }, {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': shopifyToken
+        },
+        timeout: 15000
+      });
+
+      const userErrors = metafieldResponse.data?.data?.productUpdate?.userErrors || [];
+      if (userErrors.length > 0) {
+        results.failed++;
+        results.errors.push({ handle: shopifyHandle, error: userErrors[0].message });
+      } else {
+        results.success++;
+        console.log(`[${requestId}] ✅ Linked ${shopifyHandle} → ${cjProductId}`);
+      }
+
+      // Small delay between requests
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+    } catch (linkError) {
+      console.error(`[${requestId}] Link error for ${shopifyHandle}:`, linkError.message);
+      results.failed++;
+      results.errors.push({ handle: shopifyHandle, error: linkError.message });
+    }
+  }
+
+  res.json({
+    success: true,
+    requestId,
+    linked: results.success,
+    failed: results.failed,
+    errors: results.errors
+  });
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({
@@ -1193,6 +1531,318 @@ app.post('/api/test-connection', async (req, res) => {
       error: error.response?.data?.errors || error.message
     });
   }
+});
+
+// ============================================
+// CSV IMPORT ENDPOINTS
+// ============================================
+
+// Configure multer for file uploads
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 } // 50MB
+});
+
+// Upload and parse CSV
+app.post('/api/import-csv', upload.single('file'), async (req, res) => {
+  const requestId = Date.now().toString(36);
+  console.log(`[${requestId}] POST /api/import-csv`);
+
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file uploaded', requestId });
+  }
+
+  try {
+    let csvData = req.file.buffer;
+    const filename = req.file.originalname.toLowerCase();
+
+    // Decompress if needed
+    if (filename.endsWith('.gz')) {
+      console.log(`[${requestId}] Decompressing .gz file...`);
+      csvData = zlib.gunzipSync(csvData);
+    } else if (filename.endsWith('.zip')) {
+      console.log(`[${requestId}] Extracting .zip file...`);
+      const zip = new AdmZip(req.file.buffer);
+      const entries = zip.getEntries();
+      const csvEntry = entries.find(e => e.entryName.toLowerCase().endsWith('.csv'));
+      if (!csvEntry) {
+        return res.status(400).json({ error: 'No CSV file found in ZIP', requestId });
+      }
+      csvData = csvEntry.getData();
+    }
+
+    // Parse CSV
+    console.log(`[${requestId}] Parsing CSV (${(csvData.length / 1024 / 1024).toFixed(2)}MB)...`);
+    const records = parse(csvData, {
+      columns: true,
+      skip_empty_lines: true,
+      relax_column_count: true
+    });
+
+    // Group by Handle (products have multiple variant rows)
+    const productsMap = new Map();
+    for (const row of records) {
+      const handle = row['Handle'];
+      if (!handle) continue;
+      
+      if (!productsMap.has(handle)) {
+        productsMap.set(handle, {
+          handle,
+          title: row['Title'] || handle,
+          sku: row['Variant SKU'] || null,
+          vendor: row['Vendor'] || null,
+          status: row['Status'] || 'active'
+        });
+      }
+      // Use first non-empty SKU
+      if (!productsMap.get(handle).sku && row['Variant SKU']) {
+        productsMap.get(handle).sku = row['Variant SKU'];
+      }
+    }
+
+    const products = Array.from(productsMap.values());
+    console.log(`[${requestId}] Found ${products.length} unique products`);
+
+    res.json({
+      success: true,
+      requestId,
+      totalRows: records.length,
+      uniqueProducts: products.length,
+      products
+    });
+
+  } catch (error) {
+    console.error(`[${requestId}] CSV parse error:`, error);
+    res.status(500).json({ error: error.message, requestId });
+  }
+});
+
+// Match products to CJ by title
+app.post('/api/match-products', async (req, res) => {
+  const requestId = Date.now().toString(36);
+  console.log(`[${requestId}] POST /api/match-products`);
+
+  const { products } = req.body;
+
+  if (!products || !Array.isArray(products)) {
+    return res.status(400).json({ error: 'Products array required', requestId });
+  }
+
+  if (!CJ_API_TOKEN) {
+    return res.status(400).json({ error: 'CJ API token not configured', requestId });
+  }
+
+  const results = [];
+  const batchSize = 10;
+
+  console.log(`[${requestId}] Matching ${products.length} products...`);
+
+  for (let i = 0; i < products.length; i++) {
+    const product = products[i];
+    
+    try {
+      // Search CJ by title (use first 3-4 words for better results)
+      const searchTerms = product.title.split(/\s+/).slice(0, 4).join(' ');
+      
+      const response = await axios.get('https://developers.cjdropshipping.com/api2.0/v1/product/list', {
+        params: {
+          productNameEn: searchTerms,
+          pageNum: 1,
+          pageSize: 5
+        },
+        headers: { 'CJ-Access-Token': CJ_API_TOKEN },
+        timeout: 15000
+      });
+
+      const cjProducts = response.data?.data?.list || [];
+      
+      // Calculate similarity scores
+      const matches = cjProducts.map(cj => {
+        const similarity = titleSimilarity(product.title, cj.productNameEn || '');
+        return {
+          cjProductId: cj.pid,
+          cjTitle: cj.productNameEn,
+          cjPrice: cj.sellPrice,
+          cjImage: cj.productImage,
+          similarity: Math.round(similarity * 100)
+        };
+      }).sort((a, b) => b.similarity - a.similarity);
+
+      results.push({
+        handle: product.handle,
+        title: product.title,
+        sku: product.sku,
+        matches: matches.slice(0, 3), // Top 3 matches
+        bestMatch: matches[0] || null
+      });
+
+      // Rate limiting
+      if ((i + 1) % batchSize === 0) {
+        console.log(`[${requestId}] Matched ${i + 1}/${products.length}...`);
+        await new Promise(r => setTimeout(r, 500));
+      } else {
+        await new Promise(r => setTimeout(r, 200));
+      }
+
+    } catch (error) {
+      console.error(`[${requestId}] Error matching "${product.title}":`, error.message);
+      results.push({
+        handle: product.handle,
+        title: product.title,
+        sku: product.sku,
+        matches: [],
+        bestMatch: null,
+        error: error.message
+      });
+    }
+  }
+
+  console.log(`[${requestId}] Matching complete`);
+
+  res.json({
+    success: true,
+    requestId,
+    total: products.length,
+    matched: results.filter(r => r.bestMatch && r.bestMatch.similarity >= 50).length,
+    results
+  });
+});
+
+// Simple title similarity function
+function titleSimilarity(str1, str2) {
+  const s1 = str1.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+  const s2 = str2.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+  
+  if (s1 === s2) return 1;
+  
+  const words1 = new Set(s1.split(/\s+/).filter(w => w.length > 2));
+  const words2 = new Set(s2.split(/\s+/).filter(w => w.length > 2));
+  
+  let matches = 0;
+  for (const word of words1) {
+    if (words2.has(word)) matches++;
+  }
+  
+  const totalWords = Math.max(words1.size, words2.size);
+  return totalWords > 0 ? matches / totalWords : 0;
+}
+
+// Link products (set metafields)
+app.post('/api/link-products', async (req, res) => {
+  const requestId = Date.now().toString(36);
+  console.log(`[${requestId}] POST /api/link-products`);
+
+  const { links, shopifyStore, shopifyToken } = req.body;
+
+  if (!links || !Array.isArray(links)) {
+    return res.status(400).json({ error: 'Links array required', requestId });
+  }
+
+  if (!shopifyStore || !shopifyToken) {
+    return res.status(400).json({ error: 'Shopify credentials required', requestId });
+  }
+
+  const cleanStore = shopifyStore.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  let success = 0;
+  let failed = 0;
+  const results = [];
+
+  for (const link of links) {
+    if (!link.handle || !link.cjProductId) {
+      failed++;
+      continue;
+    }
+
+    try {
+      // First, find the product ID by handle
+      const searchResponse = await axios.post(
+        `https://${cleanStore}/admin/api/2024-01/graphql.json`,
+        {
+          query: `
+            query GetProduct($handle: String!) {
+              productByHandle(handle: $handle) {
+                id
+                title
+              }
+            }
+          `,
+          variables: { handle: link.handle }
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shopify-Access-Token': shopifyToken
+          },
+          timeout: 10000
+        }
+      );
+
+      const product = searchResponse.data?.data?.productByHandle;
+      if (!product) {
+        failed++;
+        results.push({ handle: link.handle, success: false, error: 'Product not found' });
+        continue;
+      }
+
+      // Set the metafield
+      const metafieldResponse = await axios.post(
+        `https://${cleanStore}/admin/api/2024-01/graphql.json`,
+        {
+          query: `
+            mutation SetMetafield($metafields: [MetafieldsSetInput!]!) {
+              metafieldsSet(metafields: $metafields) {
+                metafields { id key value }
+                userErrors { field message }
+              }
+            }
+          `,
+          variables: {
+            metafields: [{
+              ownerId: product.id,
+              namespace: 'custom',
+              key: 'cj_product_id',
+              value: link.cjProductId,
+              type: 'single_line_text_field'
+            }]
+          }
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shopify-Access-Token': shopifyToken
+          },
+          timeout: 10000
+        }
+      );
+
+      const errors = metafieldResponse.data?.data?.metafieldsSet?.userErrors;
+      if (errors && errors.length > 0) {
+        failed++;
+        results.push({ handle: link.handle, success: false, error: errors[0].message });
+      } else {
+        success++;
+        results.push({ handle: link.handle, success: true, productId: product.id });
+      }
+
+      // Rate limit
+      await new Promise(r => setTimeout(r, 200));
+
+    } catch (error) {
+      failed++;
+      results.push({ handle: link.handle, success: false, error: error.message });
+    }
+  }
+
+  console.log(`[${requestId}] Linking complete: ${success} success, ${failed} failed`);
+
+  res.json({
+    success: true,
+    requestId,
+    total: links.length,
+    linked: success,
+    failed,
+    results
+  });
 });
 
 // Serve React frontend (if build exists)
