@@ -1183,11 +1183,24 @@ app.get('/', (req, res) => {
 // Serve React frontend (if build exists)
 const frontendPath = path.join(__dirname, '../frontend/build');
 if (fs.existsSync(frontendPath)) {
+  console.log('✅ Frontend build found, serving static files');
   app.use(express.static(frontendPath));
+  
+  // SPA fallback - serve index.html for all non-API routes
+  app.get('*', (req, res, next) => {
+    // Skip API routes
+    if (req.path.startsWith('/api/') || req.path === '/health') {
+      return next();
+    }
+    res.sendFile(path.join(frontendPath, 'index.html'));
+  });
+} else {
+  console.log('ℹ️  No frontend build found, API-only mode');
 }
 
 app.listen(PORT, () => {
-  console.log(`✅ CJ Scraper running on port ${PORT}`);
-  console.log(`Frontend: http://localhost:${PORT}`);
-  console.log(`API: http://localhost:${PORT}/api/scrape`);
+  console.log(`✅ CJ Scraper V2 running on port ${PORT}`);
+  console.log(`   Frontend: http://localhost:${PORT}`);
+  console.log(`   API: http://localhost:${PORT}/api`);
+  console.log(`   Health: http://localhost:${PORT}/health`);
 });
