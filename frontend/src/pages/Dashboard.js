@@ -29,30 +29,47 @@ function Dashboard() {
     setLoading(true);
     const creds = getCredentials();
     
-    // Check Shopify connection
+    // Check Shopify connection via backend proxy (avoids CORS)
     let shopifyStatus = 'disconnected';
     let stats = null;
     
     if (creds.shopifyStore && creds.shopifyToken) {
       try {
-        // Try to fetch shop info
-        const response = await fetch(`https://${creds.shopifyStore}/admin/api/2024-01/shop.json`, {
+        // Use backend proxy to test connection
+        const response = await fetch(`${getApiUrl()}/api/test-connection`, {
+          method: 'POST',
           headers: {
-            'X-Shopify-Access-Token': creds.shopifyToken
-          }
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            shopifyStore: creds.shopifyStore,
+            shopifyToken: creds.shopifyToken
+          })
         });
-        if (response.ok) {
+        
+        const data = await response.json();
+        
+        if (data.success) {
           shopifyStatus = 'connected';
           
-          // Get product count
-          const countResp = await fetch(`https://${creds.shopifyStore}/admin/api/2024-01/products/count.json`, {
-            headers: {
-              'X-Shopify-Access-Token': creds.shopifyToken
+          // Get product count via preview endpoint (it returns counts)
+          try {
+            const previewResp = await fetch(`${getApiUrl()}/api/sync-prices/preview`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                shopifyStore: creds.shopifyStore,
+                shopifyToken: creds.shopifyToken
+              })
+            });
+            const previewData = await previewResp.json();
+            if (previewData.success) {
+              stats = { totalProducts: previewData.totalProducts || 0 };
             }
-          });
-          if (countResp.ok) {
-            const countData = await countResp.json();
-            stats = { totalProducts: countData.count };
+          } catch (e) {
+            // Ignore count errors, connection still works
           }
         }
       } catch (e) {
