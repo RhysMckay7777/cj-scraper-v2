@@ -1,0 +1,12 @@
+{
+  "markup_multiplier": 2.0,
+  "min_price": 19.99,
+  "max_price": null,
+  "round_to": 0.95,
+  "show_compare_at": false,
+  "compare_at_markup": 1.3,
+  "auto_sync_enabled": false,
+  "auto_sync_schedule": "daily",
+  "batch_size": 50,
+  "rate_limit_delay_ms": 500
+}
