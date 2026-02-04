@@ -55,14 +55,21 @@ function SettingsPage() {
     let cleanStore = shopifyStore.replace(/^https?:\/\//, '').replace(/\/+$/, '');
     
     try {
-      const response = await fetch(`https://${cleanStore}/admin/api/2024-01/shop.json`, {
+      // Use backend proxy to avoid CORS
+      const response = await fetch(`${getApiUrl()}/api/test-connection`, {
+        method: 'POST',
         headers: {
-          'X-Shopify-Access-Token': shopifyToken
-        }
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          shopifyStore: cleanStore,
+          shopifyToken: shopifyToken
+        })
       });
       
-      if (response.ok) {
-        const data = await response.json();
+      const data = await response.json();
+      
+      if (data.success) {
         setStatus(s => ({ ...s, shopify: 'connected' }));
         setMessage({ 
           type: 'success', 
@@ -72,7 +79,7 @@ function SettingsPage() {
         setShopifyStore(cleanStore);
       } else {
         setStatus(s => ({ ...s, shopify: 'error' }));
-        setMessage({ type: 'error', text: 'Invalid credentials or store not found' });
+        setMessage({ type: 'error', text: data.error || 'Invalid credentials or store not found' });
       }
     } catch (e) {
       setStatus(s => ({ ...s, shopify: 'error' }));

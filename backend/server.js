@@ -1157,6 +1157,44 @@ app.post('/api/sync-prices/config', (req, res) => {
   }
 });
 
+// Test Shopify connection (proxy to avoid CORS)
+app.post('/api/test-connection', async (req, res) => {
+  const requestId = Date.now().toString(36);
+  console.log(`[${requestId}] POST /api/test-connection`);
+
+  const { shopifyStore, shopifyToken } = req.body;
+
+  if (!shopifyStore || !shopifyToken) {
+    return res.status(400).json({
+      success: false,
+      error: 'Shopify store and token required'
+    });
+  }
+
+  // Clean up store URL
+  const cleanStore = shopifyStore.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+
+  try {
+    const response = await axios.get(`https://${cleanStore}/admin/api/2024-01/shop.json`, {
+      headers: {
+        'X-Shopify-Access-Token': shopifyToken
+      },
+      timeout: 10000
+    });
+
+    res.json({
+      success: true,
+      shop: response.data.shop
+    });
+  } catch (error) {
+    console.error(`[${requestId}] Connection test failed:`, error.message);
+    res.status(400).json({
+      success: false,
+      error: error.response?.data?.errors || error.message
+    });
+  }
+});
+
 // Serve React frontend (if build exists)
 const frontendPath = path.join(__dirname, '../frontend/build');
 if (fs.existsSync(frontendPath)) {
