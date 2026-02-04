@@ -11,7 +11,36 @@ import {
   Loader2,
   ChevronDown
 } from 'lucide-react';
-import api from '../utils/api';
+import { getApiUrl } from '../utils/api';
+
+// Simple fetch wrapper for this page
+const api = {
+  post: async (endpoint, data) => {
+    const url = `${getApiUrl()}/api${endpoint}`;
+    
+    const fetchOptions = {
+      method: 'POST'
+    };
+    
+    if (data instanceof FormData) {
+      fetchOptions.body = data;
+    } else {
+      fetchOptions.headers = { 'Content-Type': 'application/json' };
+      fetchOptions.body = JSON.stringify(data);
+    }
+    
+    const response = await fetch(url, fetchOptions);
+    const result = await response.json();
+    
+    if (!response.ok) {
+      const error = new Error(result.error || 'Request failed');
+      error.response = { data: result };
+      throw error;
+    }
+    
+    return { data: result };
+  }
+};
 
 const ImportPage = () => {
   // State
