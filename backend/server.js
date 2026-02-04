@@ -1157,29 +1157,6 @@ app.post('/api/sync-prices/config', (req, res) => {
   }
 });
 
-// Root endpoint - API info
-app.get('/', (req, res) => {
-  res.json({
-    name: 'CJ Scraper V2 - Price Sync Edition',
-    version: '2.0.0',
-    status: 'running',
-    endpoints: {
-      health: '/health',
-      scrape: '/api/scrape',
-      categories: '/api/categories',
-      uploadShopify: '/api/upload-shopify',
-      priceSync: {
-        preview: 'POST /api/sync-prices/preview',
-        sync: 'POST /api/sync-prices',
-        singleProduct: 'POST /api/sync-prices/product/:id',
-        config: 'GET/POST /api/sync-prices/config',
-        setMetafield: 'POST /api/set-cj-metafield'
-      }
-    },
-    docs: 'https://github.com/RhysMckay7777/cj-scraper-v2/blob/main/PRICE_SYNC.md'
-  });
-});
-
 // Serve React frontend (if build exists)
 const frontendPath = path.join(__dirname, '../frontend/build');
 if (fs.existsSync(frontendPath)) {
@@ -1196,6 +1173,29 @@ if (fs.existsSync(frontendPath)) {
   });
 } else {
   console.log('ℹ️  No frontend build found, API-only mode');
+  
+  // Root endpoint - API info (only when no frontend)
+  app.get('/', (req, res) => {
+    res.json({
+      name: 'CJ Scraper V2 - Price Sync Edition',
+      version: '2.0.0',
+      status: 'running',
+      endpoints: {
+        health: '/health',
+        scrape: '/api/scrape',
+        categories: '/api/categories',
+        uploadShopify: '/api/upload-shopify',
+        priceSync: {
+          preview: 'POST /api/sync-prices/preview',
+          sync: 'POST /api/sync-prices',
+          singleProduct: 'POST /api/sync-prices/product/:id',
+          config: 'GET/POST /api/sync-prices/config',
+          setMetafield: 'POST /api/set-cj-metafield'
+        }
+      },
+      docs: 'https://github.com/RhysMckay7777/cj-scraper-v2/blob/main/PRICE_SYNC.md'
+    });
+  });
 }
 
 app.listen(PORT, () => {
