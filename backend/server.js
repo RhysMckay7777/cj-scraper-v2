@@ -1078,10 +1078,10 @@ app.post('/api/upload-shopify', async (req, res) => {
 
     const input = {
       title: product.title || 'Untitled Product',
-      vendor: 'CJ Dropshipping',
-      productType: 'Imported',
+      vendor: product.storeName || product.vendor || 'Store',
+      productType: product.productType || 'Imported',
       status: 'ACTIVE', // Enum - GraphQL variables handle this automatically
-      tags: ['dropship', 'cj', product.sourceKeyword || ''].filter(Boolean),
+      tags: [product.sourceKeyword || ''].filter(Boolean),
       // Single variant product - use default option
       productOptions: [{
         name: 'Title',
