@@ -118,8 +118,8 @@ async function fetchShopifyProducts(shopifyStore, shopifyToken) {
       await new Promise(resolve => setTimeout(resolve, 200));
       
     } catch (error) {
-      console.error('[Matcher] Error fetching products:', error.message);
-      throw error;
+      console.error('[Matcher] Error fetching products:', error.message, 'Status:', error.response?.status, 'URL:', error.config?.url);
+      throw new Error(`Shopify API error: ${error.message} (store: ${shopifyStore})`);
     }
   }
   

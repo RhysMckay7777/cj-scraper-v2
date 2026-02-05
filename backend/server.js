@@ -1336,15 +1336,19 @@ app.post('/api/sync-prices/preview', async (req, res) => {
   }
 
   try {
+    console.log(`[${requestId}] Calling generatePreview for store: ${shopifyStore}`);
     const preview = await generatePreview(shopifyStore, shopifyToken, CJ_API_TOKEN, options);
     
+    console.log(`[${requestId}] Preview result: success=${preview.success}, products=${preview.products?.length || 0}`);
+    res.set('Cache-Control', 'no-store, no-cache');
     res.json({
       success: preview.success,
       requestId,
       ...preview
     });
   } catch (error) {
-    console.error(`[${requestId}] Preview error:`, error);
+    console.error(`[${requestId}] Preview error:`, error.message, error.response?.status, error.response?.data);
+    res.set('Cache-Control', 'no-store, no-cache');
     res.status(500).json({
       error: error.message,
       requestId
