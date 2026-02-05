@@ -15,9 +15,24 @@ const CJ_API_BASE = 'https://developers.cjdropshipping.com/api2.0/v1';
 /**
  * Fetch single CJ product price
  */
+// Cache CJ prices for 24 hours to avoid burning API quota (1000 req/day limit)
+const cjPriceCache = new Map();
+const CJ_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+
 let cjErrorLogged = false;
+let cjRateLimited = false;
 
 async function fetchCJPrice(pid, cjToken) {
+  // Check cache first
+  const cached = cjPriceCache.get(pid);
+  if (cached && (Date.now() - cached.ts < CJ_CACHE_TTL)) {
+    return cached.price;
+  }
+
+  // If we're rate-limited, don't make more requests
+  if (cjRateLimited) {
+    return null;
+  }
   try {
     const response = await axios.get(`${CJ_API_BASE}/product/query`, {
       params: { pid },
@@ -25,16 +40,32 @@ async function fetchCJPrice(pid, cjToken) {
       timeout: 8000
     });
     if (response.data.result && response.data.data) {
-      cjErrorLogged = false; // Reset on success
-      return parseFloat(response.data.data.sellPrice) || null;
+      cjErrorLogged = false;
+      const price = parseFloat(response.data.data.sellPrice) || null;
+      cjPriceCache.set(pid, { price, ts: Date.now() });
+      return price;
     }
-    // Log the first CJ API rejection to help debug
+    // Check for rate limiting
+    if (response.data.code === 1600200 || response.data.message?.includes('Too Many Requests')) {
+      console.warn(`[Sync] CJ API rate limited! ${response.data.message}`);
+      cjRateLimited = true;
+      // Auto-reset after 1 hour (in case it's hourly, not daily)
+      setTimeout(() => { cjRateLimited = false; }, 60 * 60 * 1000);
+      return null;
+    }
     if (!cjErrorLogged) {
       console.warn(`[Sync] CJ API returned no data for ${pid}: code=${response.data.code}, message=${response.data.message}`);
       cjErrorLogged = true;
     }
+    cjPriceCache.set(pid, { price: null, ts: Date.now() });
     return null;
   } catch (e) {
+    if (e.response?.status === 429) {
+      console.warn(`[Sync] CJ API rate limited (HTTP 429)`);
+      cjRateLimited = true;
+      setTimeout(() => { cjRateLimited = false; }, 60 * 60 * 1000);
+      return null;
+    }
     if (!cjErrorLogged) {
       console.warn(`[Sync] CJ API error for ${pid}: ${e.message}`);
       cjErrorLogged = true;
