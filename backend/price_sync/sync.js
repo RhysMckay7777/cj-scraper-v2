@@ -40,34 +40,40 @@ async function updateShopifyPrice(product, newPrice, compareAtPrice, shopifyStor
   const GRAPHQL_ENDPOINT = `https://${cleanStoreUrl}/admin/api/2024-01/graphql.json`;
   
   const mutation = `
-    mutation UpdateVariantPrice($input: ProductVariantInput!) {
-      productVariantUpdate(input: $input) {
-        productVariant { id price compareAtPrice }
+    mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+        productVariants { id price compareAtPrice }
         userErrors { field message }
       }
     }
   `;
   
+  const productId = product.graphqlId || `gid://shopify/Product/${product.shopifyId}`;
   const variantId = product.variantGraphqlId || `gid://shopify/ProductVariant/${product.variantId}`;
-  const input = { id: variantId, price: newPrice.toFixed(2) };
-  if (compareAtPrice !== null) input.compareAtPrice = compareAtPrice.toFixed(2);
+  const variant = { id: variantId, price: newPrice.toFixed(2) };
+  if (compareAtPrice !== null) variant.compareAtPrice = compareAtPrice.toFixed(2);
   
   try {
     const response = await axios.post(GRAPHQL_ENDPOINT, {
-      query: mutation, variables: { input }
+      query: mutation, variables: { productId, variants: [variant] }
     }, {
       headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': shopifyToken },
       timeout: 10000
     });
     
-    const result = response.data.data?.productVariantUpdate;
+    if (response.data.errors?.length > 0) {
+      return { success: false, error: response.data.errors.map(e => e.message).join(', ') };
+    }
+    
+    const result = response.data.data?.productVariantsBulkUpdate;
     if (result?.userErrors?.length > 0) {
       return { success: false, error: result.userErrors.map(e => e.message).join(', ') };
     }
+    const updated = result?.productVariants?.[0];
     return {
       success: true,
-      newPrice: parseFloat(result.productVariant.price),
-      newCompareAtPrice: result.productVariant.compareAtPrice ? parseFloat(result.productVariant.compareAtPrice) : null
+      newPrice: parseFloat(updated?.price || newPrice),
+      newCompareAtPrice: updated?.compareAtPrice ? parseFloat(updated.compareAtPrice) : null
     };
   } catch (error) {
     return { success: false, error: error.message };
