@@ -15,6 +15,8 @@ const CJ_API_BASE = 'https://developers.cjdropshipping.com/api2.0/v1';
 /**
  * Fetch single CJ product price
  */
+let cjErrorLogged = false;
+
 async function fetchCJPrice(pid, cjToken) {
   try {
     const response = await axios.get(`${CJ_API_BASE}/product/query`, {
@@ -23,11 +25,20 @@ async function fetchCJPrice(pid, cjToken) {
       timeout: 8000
     });
     if (response.data.result && response.data.data) {
+      cjErrorLogged = false; // Reset on success
       return parseFloat(response.data.data.sellPrice) || null;
+    }
+    // Log the first CJ API rejection to help debug
+    if (!cjErrorLogged) {
+      console.warn(`[Sync] CJ API returned no data for ${pid}: code=${response.data.code}, message=${response.data.message}`);
+      cjErrorLogged = true;
     }
     return null;
   } catch (e) {
-    console.warn(`[Sync] CJ price fetch failed for ${pid}: ${e.message}`);
+    if (!cjErrorLogged) {
+      console.warn(`[Sync] CJ API error for ${pid}: ${e.message}`);
+      cjErrorLogged = true;
+    }
     return null;
   }
 }

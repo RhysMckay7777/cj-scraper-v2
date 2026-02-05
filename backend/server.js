@@ -1356,6 +1356,34 @@ app.post('/api/sync-prices/preview', async (req, res) => {
   }
 });
 
+// CJ API diagnostic endpoint
+app.get('/api/cj-status', async (req, res) => {
+  try {
+    const testPid = '2508280550501615400'; // Known product
+    const response = await axios.get('https://developers.cjdropshipping.com/api2.0/v1/product/query', {
+      params: { pid: testPid },
+      headers: { 'CJ-Access-Token': CJ_API_TOKEN },
+      timeout: 8000
+    });
+    res.json({
+      tokenPresent: !!CJ_API_TOKEN,
+      tokenPrefix: CJ_API_TOKEN ? CJ_API_TOKEN.substring(0, 10) + '...' : null,
+      cjResponse: {
+        result: response.data.result,
+        code: response.data.code,
+        message: response.data.message,
+        hasData: !!response.data.data,
+        sellPrice: response.data.data?.sellPrice || null
+      }
+    });
+  } catch (error) {
+    res.json({
+      tokenPresent: !!CJ_API_TOKEN,
+      error: error.message
+    });
+  }
+});
+
 // Background sync state
 const activeSyncs = new Map();
 
