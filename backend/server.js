@@ -1356,7 +1356,147 @@ app.post('/api/sync-prices/preview', async (req, res) => {
   }
 });
 
-// Execute price sync
+// Background sync state
+const activeSyncs = new Map();
+
+// Start background price sync for ALL products
+app.post('/api/sync-prices/start', async (req, res) => {
+  const syncId = `sync_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+  console.log(`[${syncId}] POST /api/sync-prices/start`);
+
+  const { shopifyStore, shopifyToken, options = {} } = req.body;
+
+  if (!shopifyStore || !shopifyToken) {
+    return res.status(400).json({ error: 'Shopify credentials required' });
+  }
+  if (!CJ_API_TOKEN) {
+    return res.status(400).json({ error: 'CJ API token not configured on server' });
+  }
+
+  // Initialize sync state
+  activeSyncs.set(syncId, {
+    status: 'running',
+    startedAt: Date.now(),
+    total: 0,
+    processed: 0,
+    updated: 0,
+    failed: 0,
+    skipped: 0,
+    errors: [],
+    products: []
+  });
+
+  // Return immediately, process in background
+  res.json({ success: true, syncId });
+
+  // Background processing
+  (async () => {
+    const state = activeSyncs.get(syncId);
+    try {
+      const { fetchShopifyProducts } = require('./price_sync/matcher');
+      const { fetchCJPrice } = require('./price_sync/sync');
+      const { calculatePrice, calculateChange, loadConfig } = require('./price_sync/calculator');
+
+      console.log(`[${syncId}] Fetching Shopify products...`);
+      const shopifyProducts = await fetchShopifyProducts(shopifyStore, shopifyToken);
+      const withCjId = shopifyProducts.filter(p => p.cjProductId);
+      state.total = withCjId.length;
+
+      const config = loadConfig();
+      console.log(`[${syncId}] Processing ${withCjId.length} products...`);
+
+      for (const product of withCjId) {
+        const cjPrice = await fetchCJPrice(product.cjProductId, CJ_API_TOKEN);
+        state.processed++;
+
+        if (cjPrice === null) {
+          state.skipped++;
+          state.products.push({
+            title: product.title,
+            shopifyId: product.shopifyId,
+            status: 'skipped',
+            reason: 'CJ price not found'
+          });
+          continue;
+        }
+
+        const { price: newPrice, compareAtPrice } = calculatePrice(cjPrice, config);
+        const { change, direction } = calculateChange(product.currentPrice, newPrice);
+
+        // Skip if price unchanged
+        if (Math.abs(newPrice - product.currentPrice) < 0.01) {
+          state.skipped++;
+          state.products.push({
+            title: product.title,
+            shopifyId: product.shopifyId,
+            status: 'unchanged',
+            currentPrice: product.currentPrice,
+            cjPrice
+          });
+          continue;
+        }
+
+        // Update Shopify price
+        const { updateShopifyPrice } = require('./price_sync/sync');
+        const result = await updateShopifyPrice(product, newPrice, compareAtPrice, shopifyStore, shopifyToken);
+
+        if (result.success) {
+          state.updated++;
+          state.products.push({
+            title: product.title,
+            shopifyId: product.shopifyId,
+            status: 'updated',
+            oldPrice: product.currentPrice,
+            newPrice,
+            cjPrice,
+            change,
+            direction
+          });
+        } else {
+          state.failed++;
+          state.errors.push({ title: product.title, error: result.error });
+          state.products.push({
+            title: product.title,
+            shopifyId: product.shopifyId,
+            status: 'failed',
+            error: result.error
+          });
+        }
+
+        // Rate limit
+        await new Promise(r => setTimeout(r, 400));
+      }
+
+      state.status = 'complete';
+      console.log(`[${syncId}] Complete: ${state.updated} updated, ${state.failed} failed, ${state.skipped} skipped`);
+    } catch (error) {
+      state.status = 'error';
+      state.error = error.message;
+      console.error(`[${syncId}] Sync error:`, error.message);
+    }
+
+    // Auto-cleanup after 30 minutes
+    setTimeout(() => activeSyncs.delete(syncId), 30 * 60 * 1000);
+  })();
+});
+
+// Check sync progress
+app.get('/api/sync-prices/status/:syncId', (req, res) => {
+  const state = activeSyncs.get(req.params.syncId);
+  if (!state) {
+    return res.status(404).json({ error: 'Sync not found' });
+  }
+  res.set('Cache-Control', 'no-store, no-cache');
+  res.json({
+    success: true,
+    ...state,
+    // Only return last 20 products to keep response small
+    products: state.products.slice(-20),
+    elapsedMs: Date.now() - state.startedAt
+  });
+});
+
+// Legacy execute price sync (for small batches)
 app.post('/api/sync-prices', async (req, res) => {
   const requestId = Date.now().toString(36);
   console.log(`[${requestId}] POST /api/sync-prices`);

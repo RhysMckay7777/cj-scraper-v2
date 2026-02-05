@@ -67,7 +67,7 @@ function PriceSync() {
   };
 
   const executeSync = async () => {
-    if (!hasCredentials || selectedProducts.size === 0) return;
+    if (!hasCredentials) return;
 
     setSyncing(true);
     setSyncProgress(0);
@@ -75,47 +75,73 @@ function PriceSync() {
     setSyncResults(null);
 
     try {
-      // Get only selected product IDs
-      const productIds = Array.from(selectedProducts);
-      
-      const response = await fetch(`${getApiUrl()}/api/sync-prices`, {
+      // Start background sync for ALL products
+      const startResponse = await fetch(`${getApiUrl()}/api/sync-prices/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           shopifyStore: creds.shopifyStore,
-          shopifyToken: creds.shopifyToken,
-          options: {
-            productIds: productIds.length < preview?.products?.length ? productIds : undefined
-          }
+          shopifyToken: creds.shopifyToken
         })
       });
 
-      const data = await response.json();
-
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || 'Sync failed');
+      const startData = await startResponse.json();
+      if (!startResponse.ok || !startData.success) {
+        throw new Error(startData.error || 'Failed to start sync');
       }
 
-      setSyncResults(data);
-      setSyncProgress(100);
+      const syncId = startData.syncId;
 
-      // Save to localStorage for dashboard
-      localStorage.setItem('lastSyncTime', new Date().toISOString());
-      localStorage.setItem('lastSyncResults', JSON.stringify({
-        total: data.summary?.total || 0,
-        updated: data.summary?.updated || 0,
-        noChange: data.summary?.skipped || 0,
-        errors: data.summary?.errors || 0
-      }));
+      // Poll for progress
+      let complete = false;
+      while (!complete) {
+        await new Promise(r => setTimeout(r, 2000)); // Poll every 2 seconds
 
-      // Save to history
-      const history = JSON.parse(localStorage.getItem('syncHistory') || '[]');
-      history.unshift({
-        timestamp: new Date().toISOString(),
-        summary: data.summary,
-        products: data.results?.slice(0, 50) // Keep first 50 for details
-      });
-      localStorage.setItem('syncHistory', JSON.stringify(history.slice(0, 20))); // Keep last 20
+        const statusResponse = await fetch(`${getApiUrl()}/api/sync-prices/status/${syncId}`);
+        const status = await statusResponse.json();
+
+        if (!statusResponse.ok) {
+          throw new Error(status.error || 'Failed to check sync status');
+        }
+
+        const progress = status.total > 0 ? Math.round((status.processed / status.total) * 100) : 0;
+        setSyncProgress(progress);
+
+        if (status.status === 'complete') {
+          complete = true;
+          setSyncResults({
+            success: true,
+            summary: {
+              total: status.total,
+              updated: status.updated,
+              skipped: status.skipped,
+              errors: status.failed
+            },
+            results: status.products
+          });
+          setSyncProgress(100);
+
+          // Save to localStorage
+          localStorage.setItem('lastSyncTime', new Date().toISOString());
+          localStorage.setItem('lastSyncResults', JSON.stringify({
+            total: status.total,
+            updated: status.updated,
+            noChange: status.skipped,
+            errors: status.failed
+          }));
+
+          const history = JSON.parse(localStorage.getItem('syncHistory') || '[]');
+          history.unshift({
+            timestamp: new Date().toISOString(),
+            summary: { total: status.total, updated: status.updated, skipped: status.skipped, failed: status.failed },
+            products: status.products?.slice(0, 50)
+          });
+          localStorage.setItem('syncHistory', JSON.stringify(history.slice(0, 20)));
+
+        } else if (status.status === 'error') {
+          throw new Error(status.error || 'Sync failed');
+        }
+      }
 
     } catch (e) {
       setError(e.message);
@@ -222,7 +248,7 @@ function PriceSync() {
               className="flex items-center gap-2 px-4 py-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 rounded-lg transition font-medium"
             >
               <RefreshCw size={18} className={syncing ? 'animate-spin' : ''} />
-              {syncing ? 'Syncing...' : `Sync ${selectedProducts.size} Products`}
+              {syncing ? `Syncing... ${syncProgress}%` : `Sync All ${preview?.matchedProducts || ''} Products`}
             </button>
           )}
         </div>
