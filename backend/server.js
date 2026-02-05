@@ -1104,14 +1104,22 @@ app.post('/api/upload-shopify', async (req, res) => {
       }];
     }
 
-    // Store CJ Product ID in metafield for price sync
+    // Store CJ Product ID in metafields for price sync + source tracking
     if (product.pid) {
-      input.metafields = [{
-        namespace: 'custom',
-        key: 'cj_product_id',
-        value: product.pid,
-        type: 'single_line_text_field'
-      }];
+      input.metafields = [
+        {
+          namespace: 'custom',
+          key: 'cj_product_id',
+          value: product.pid,
+          type: 'single_line_text_field'
+        },
+        {
+          namespace: 'cjdrop',
+          key: 'source_url',
+          value: `https://www.cjdropshipping.com/product/${product.pid}`,
+          type: 'single_line_text_field'
+        }
+      ];
     }
 
     return input;
